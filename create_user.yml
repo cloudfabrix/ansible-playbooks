@@ -1,0 +1,55 @@
+---
+# Playbook: Create a system user with sudo access and SSH key
+# Usage: ansible-playbook 09_create_user.yml -i inventory.ini
+#        -e "new_user=deploy ssh_pub_key='ssh-rsa AAAA...'"
+
+- name: Create a system user with SSH access
+  hosts: all
+  become: true
+  vars:
+    new_user: deploy
+    user_shell: /bin/bash
+    user_groups:
+      - sudo
+    ssh_pub_key: ""          # Pass via -e or vault
+    create_home: true
+    password_login: false    # Disable password auth for this user
+
+  tasks:
+    - name: Create user {{ new_user }}
+      user:
+        name: "{{ new_user }}"
+        shell: "{{ user_shell }}"
+        groups: "{{ user_groups }}"
+        append: true
+        create_home: "{{ create_home }}"
+        state: present
+
+    - name: Set up authorized SSH key
+      authorized_key:
+        user: "{{ new_user }}"
+        state: present
+        key: "{{ ssh_pub_key }}"
+      when: ssh_pub_key | length > 0
+
+    - name: Lock password login for user (force key-only auth)
+      user:
+        name: "{{ new_user }}"
+        password_lock: true
+      when: password_login == false
+
+    - name: Add sudoers entry (NOPASSWD)
+      copy:
+        dest: "/etc/sudoers.d/{{ new_user }}"
+        content: "{{ new_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Verify user exists
+      command: "id {{ new_user }}"
+      register: user_info
+      changed_when: false
+
+    - name: Show user info
+      debug:
+        msg: "{{ user_info.stdout }}"

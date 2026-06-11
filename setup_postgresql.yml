@@ -1,0 +1,89 @@
+---
+# Playbook: Install and configure PostgreSQL
+# Usage: ansible-playbook 13_setup_postgresql.yml -i inventory.ini
+#        -e "pg_version=16 db_name=myapp db_user=myapp db_password=secret"
+
+- name: Install and configure PostgreSQL
+  hosts: all
+  become: true
+  vars:
+    pg_version: "16"
+    db_name: myapp
+    db_user: myapp
+    db_password: "changeme"        # Use ansible-vault in production
+    db_encoding: UTF8
+    pg_listen_addresses: "localhost"
+    pg_port: 5432
+    allowed_cidr: "127.0.0.1/32"
+
+  tasks:
+    - name: Install PostgreSQL and contrib
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-contrib"
+          - python3-psycopg2
+        state: present
+        update_cache: true
+
+    - name: Ensure PostgreSQL service is started
+      service:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Set PostgreSQL listen_addresses
+      lineinfile:
+        path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+        regexp: "^#?listen_addresses"
+        line: "listen_addresses = '{{ pg_listen_addresses }}'"
+      notify: Restart PostgreSQL
+
+    - name: Create database user
+      become_user: postgres
+      postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        state: present
+
+    - name: Create database
+      become_user: postgres
+      postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+        encoding: "{{ db_encoding }}"
+        state: present
+
+    - name: Grant all privileges on database to user
+      become_user: postgres
+      postgresql_privs:
+        database: "{{ db_name }}"
+        roles: "{{ db_user }}"
+        privs: ALL
+        type: database
+        state: present
+
+    - name: Configure pg_hba.conf for user
+      postgresql_pg_hba:
+        dest: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+        contype: host
+        databases: "{{ db_name }}"
+        users: "{{ db_user }}"
+        source: "{{ allowed_cidr }}"
+        method: md5
+        state: present
+      notify: Restart PostgreSQL
+
+    - name: Open PostgreSQL port in UFW (if not localhost-only)
+      ufw:
+        rule: allow
+        port: "{{ pg_port }}"
+        proto: tcp
+      when: pg_listen_addresses != "localhost"
+      ignore_errors: true
+
+  handlers:
+    - name: Restart PostgreSQL
+      service:
+        name: postgresql
+        state: restarted

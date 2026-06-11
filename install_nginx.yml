@@ -1,0 +1,52 @@
+---
+# Playbook: Install and start nginx web server
+# Usage: ansible-playbook 04_install_nginx.yml -i inventory.ini
+
+- name: Install and configure nginx
+  hosts: all
+  become: true
+  vars:
+    nginx_port: 80
+    nginx_worker_processes: auto
+    nginx_worker_connections: 1024
+
+  tasks:
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Deploy nginx main config
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        backup: true
+      notify: Reload nginx
+      when: false  # Enable once templates/ dir is populated
+
+    - name: Ensure nginx is started and enabled
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Allow HTTP through UFW
+      ufw:
+        rule: allow
+        port: "{{ nginx_port }}"
+        proto: tcp
+      ignore_errors: true
+
+    - name: Verify nginx is responding
+      uri:
+        url: "http://localhost:{{ nginx_port }}"
+        status_code: 200
+      retries: 3
+      delay: 5
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

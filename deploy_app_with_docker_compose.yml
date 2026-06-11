@@ -1,0 +1,113 @@
+---
+# Playbook: Deploy a multi-container application via Docker Compose
+# Usage: ansible-playbook 29_deploy_app_with_docker_compose.yml -i inventory.ini
+#        -e "app_name=myapp compose_src=./docker-compose.yml"
+
+- name: Deploy application via Docker Compose
+  hosts: all
+  become: true
+  vars:
+    app_name: myapp
+    app_dir: "/opt/{{ app_name }}"
+    compose_src: ""            # local path to docker-compose.yml; leave empty to use inline
+    app_user: deploy
+    env_file_src: ""           # local .env file to upload
+    pull_images: true
+    remove_orphans: true
+
+  tasks:
+    - name: Ensure Docker and Docker Compose plugin are installed
+      apt:
+        name:
+          - docker-ce
+          - docker-compose-plugin
+        state: present
+      ignore_errors: true
+
+    - name: Create app directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0750"
+
+    - name: Upload docker-compose.yml from local path
+      copy:
+        src: "{{ compose_src }}"
+        dest: "{{ app_dir }}/docker-compose.yml"
+        owner: "{{ app_user }}"
+        mode: "0640"
+      when: compose_src | length > 0
+
+    - name: Write inline docker-compose.yml (example stack)
+      copy:
+        dest: "{{ app_dir }}/docker-compose.yml"
+        owner: "{{ app_user }}"
+        mode: "0640"
+        content: |
+          version: "3.9"
+          services:
+            web:
+              image: nginx:alpine
+              ports:
+                - "80:80"
+              volumes:
+                - ./html:/usr/share/nginx/html:ro
+              restart: unless-stopped
+              depends_on:
+                - api
+
+            api:
+              image: node:20-alpine
+              working_dir: /app
+              command: node server.js
+              ports:
+                - "3000:3000"
+              environment:
+                - NODE_ENV=production
+                - REDIS_URL=redis://cache:6379
+              restart: unless-stopped
+              depends_on:
+                - cache
+
+            cache:
+              image: redis:7-alpine
+              restart: unless-stopped
+              volumes:
+                - redis_data:/data
+
+          volumes:
+            redis_data:
+      when: compose_src | length == 0
+      force: false
+
+    - name: Upload .env file if provided
+      copy:
+        src: "{{ env_file_src }}"
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ app_user }}"
+        mode: "0600"
+      when: env_file_src | length > 0
+
+    - name: Pull latest images
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        pull: always
+        state: present
+      when: pull_images
+
+    - name: Deploy with Docker Compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        state: present
+        remove_orphans: "{{ remove_orphans }}"
+
+    - name: Show running containers
+      command: docker compose -f {{ app_dir }}/docker-compose.yml ps
+      register: compose_ps
+      changed_when: false
+
+    - name: Display container status
+      debug:
+        var: compose_ps.stdout_lines

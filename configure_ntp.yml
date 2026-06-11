@@ -1,0 +1,82 @@
+---
+# Playbook: Configure NTP time sync using chrony or systemd-timesyncd
+# Usage: ansible-playbook 28_configure_ntp.yml -i inventory.ini
+
+- name: Configure NTP time synchronisation
+  hosts: all
+  become: true
+  vars:
+    ntp_client: chrony      # chrony or timesyncd
+    timezone: "UTC"
+    ntp_servers:
+      - "0.pool.ntp.org"
+      - "1.pool.ntp.org"
+      - "2.pool.ntp.org"
+      - "3.pool.ntp.org"
+
+  tasks:
+    - name: Set system timezone
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Install chrony
+      apt:
+        name: chrony
+        state: present
+        update_cache: true
+      when: ntp_client == "chrony"
+
+    - name: Configure chrony NTP servers
+      copy:
+        dest: /etc/chrony/chrony.conf
+        content: |
+          {% for srv in ntp_servers %}
+          pool {{ srv }} iburst
+          {% endfor %}
+          driftfile /var/lib/chrony/drift
+          makestep 1.0 3
+          rtcsync
+          logdir /var/log/chrony
+        backup: true
+      notify: Restart chrony
+      when: ntp_client == "chrony"
+
+    - name: Ensure chrony is running
+      service:
+        name: chrony
+        state: started
+        enabled: true
+      when: ntp_client == "chrony"
+
+    - name: Configure systemd-timesyncd
+      copy:
+        dest: /etc/systemd/timesyncd.conf
+        content: |
+          [Time]
+          NTP={{ ntp_servers | join(' ') }}
+          FallbackNTP=ntp.ubuntu.com
+        backup: true
+      notify: Restart timesyncd
+      when: ntp_client == "timesyncd"
+
+    - name: Verify time sync status (chrony)
+      command: chronyc tracking
+      register: chrony_status
+      changed_when: false
+      when: ntp_client == "chrony"
+
+    - name: Show time sync status
+      debug:
+        var: chrony_status.stdout_lines
+      when: ntp_client == "chrony"
+
+  handlers:
+    - name: Restart chrony
+      service:
+        name: chrony
+        state: restarted
+
+    - name: Restart timesyncd
+      service:
+        name: systemd-timesyncd
+        state: restarted

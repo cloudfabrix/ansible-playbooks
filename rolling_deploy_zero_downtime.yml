@@ -1,0 +1,156 @@
+---
+# Playbook: Rolling deploy of a systemd service with zero-downtime drain + health check
+# This is a more complex example demonstrating:
+#  - Serial batch execution (1 host at a time)
+#  - Removing host from load balancer before update
+#  - Draining connections
+#  - Health check gate before re-adding to LB
+#  - Automatic rollback on failure
+#
+# Usage: ansible-playbook 30_rolling_deploy_zero_downtime.yml -i inventory.ini
+#        -e "app_version=2.1.0 artifact_url=https://releases.example.com/app-2.1.0.tar.gz"
+
+- name: Rolling zero-downtime deploy
+  hosts: app_servers
+  become: true
+  serial: 1                         # Deploy one host at a time
+  max_fail_percentage: 0            # Abort entire play on any failure
+
+  vars:
+    app_name: myapp
+    app_version: "2.1.0"
+    artifact_url: "https://releases.example.com/{{ app_name }}-{{ app_version }}.tar.gz"
+    app_dir: "/opt/{{ app_name }}"
+    app_user: "{{ app_name }}"
+    service_name: "{{ app_name }}"
+    health_check_url: "http://localhost:8080/health"
+    health_check_retries: 12
+    health_check_delay: 5
+    haproxy_backend: "{{ app_name }}_backend"
+    haproxy_host: "{{ groups['lb'][0] }}"   # First host in [lb] group
+
+  tasks:
+    # ── Phase 1: Drain this node from the load balancer ──────────────────
+    - name: Disable this node in HAProxy (drain traffic)
+      community.general.haproxy:
+        state: disabled
+        host: "{{ inventory_hostname }}"
+        backend: "{{ haproxy_backend }}"
+        socket: /var/run/haproxy/admin.sock
+        wait: true
+        wait_interval: 2
+        wait_retries: 30
+      delegate_to: "{{ haproxy_host }}"
+      ignore_errors: true
+
+    - name: Wait for existing connections to drain
+      pause:
+        seconds: 10
+
+    # ── Phase 2: Back up current version for rollback ────────────────────
+    - name: Detect currently deployed version
+      slurp:
+        src: "{{ app_dir }}/VERSION"
+      register: current_version_b64
+      ignore_errors: true
+
+    - name: Set rollback fact
+      set_fact:
+        rollback_version: "{{ current_version_b64['content'] | b64decode | trim }}"
+      when: current_version_b64 is not failed
+
+    - name: Snapshot current app dir for rollback
+      command: >
+        cp -a {{ app_dir }} {{ app_dir }}.rollback
+      args:
+        creates: "{{ app_dir }}.rollback"
+
+    # ── Phase 3: Deploy new version ──────────────────────────────────────
+    - name: Download new artifact
+      get_url:
+        url: "{{ artifact_url }}"
+        dest: "/tmp/{{ app_name }}-{{ app_version }}.tar.gz"
+        mode: "0644"
+        timeout: 120
+
+    - name: Extract new artifact
+      unarchive:
+        src: "/tmp/{{ app_name }}-{{ app_version }}.tar.gz"
+        dest: "{{ app_dir }}"
+        remote_src: true
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+
+    - name: Write VERSION file
+      copy:
+        dest: "{{ app_dir }}/VERSION"
+        content: "{{ app_version }}\n"
+        owner: "{{ app_user }}"
+
+    - name: Restart application service
+      service:
+        name: "{{ service_name }}"
+        state: restarted
+
+    # ── Phase 4: Health check gate ───────────────────────────────────────
+    - name: Wait for application health check to pass
+      uri:
+        url: "{{ health_check_url }}"
+        status_code: 200
+      register: health_result
+      retries: "{{ health_check_retries }}"
+      delay: "{{ health_check_delay }}"
+      until: health_result.status == 200
+
+    # ── Phase 5: Re-add node to load balancer ────────────────────────────
+    - name: Re-enable node in HAProxy
+      community.general.haproxy:
+        state: enabled
+        host: "{{ inventory_hostname }}"
+        backend: "{{ haproxy_backend }}"
+        socket: /var/run/haproxy/admin.sock
+      delegate_to: "{{ haproxy_host }}"
+      ignore_errors: true
+
+    - name: Clean up old rollback snapshot and temp files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ app_dir }}.rollback"
+        - "/tmp/{{ app_name }}-{{ app_version }}.tar.gz"
+
+    - name: Confirm successful deploy
+      debug:
+        msg: "✓ {{ inventory_hostname }} now running {{ app_name }} v{{ app_version }}"
+
+  # ── Rescue block: automatic rollback on failure ───────────────────────
+  rescue:
+    - name: ROLLBACK — stop failed service
+      service:
+        name: "{{ service_name }}"
+        state: stopped
+      ignore_errors: true
+
+    - name: ROLLBACK — restore previous version
+      command: >
+        rsync -a --delete {{ app_dir }}.rollback/ {{ app_dir }}/
+      ignore_errors: true
+
+    - name: ROLLBACK — restart with previous version
+      service:
+        name: "{{ service_name }}"
+        state: started
+      ignore_errors: true
+
+    - name: ROLLBACK — keep node out of load balancer (manual inspection needed)
+      debug:
+        msg: |
+          ROLLBACK TRIGGERED on {{ inventory_hostname }}.
+          Node remains DISABLED in load balancer.
+          Rolled back to: {{ rollback_version | default('unknown') }}.
+          Manual inspection required.
+
+    - name: Fail the play to stop further hosts from deploying
+      fail:
+        msg: "Deploy failed on {{ inventory_hostname }}. Rollback applied. Halting."

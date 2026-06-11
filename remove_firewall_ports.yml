@@ -1,0 +1,34 @@
+---
+# Playbook: Remove ports from UFW firewall
+# Usage: ansible-playbook 03_remove_firewall_ports.yml -i inventory.ini
+#        -e "ports_to_remove=[8080,9090]"
+
+- name: Remove ports from UFW firewall
+  hosts: all
+  become: true
+  vars:
+    ports_to_remove:
+      - port: "8080"
+        proto: tcp
+      - port: "9090"
+        proto: tcp
+
+  tasks:
+    - name: Check UFW is installed
+      apt:
+        name: ufw
+        state: present
+
+    - name: Delete UFW rules for specified ports
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+        delete: true
+      loop: "{{ ports_to_remove }}"
+      notify: Reload UFW
+
+  handlers:
+    - name: Reload UFW
+      command: ufw reload
+      changed_when: true

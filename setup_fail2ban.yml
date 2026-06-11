@@ -1,0 +1,74 @@
+---
+# Playbook: Install and configure fail2ban for SSH brute-force protection
+# Usage: ansible-playbook 16_setup_fail2ban.yml -i inventory.ini
+
+- name: Install and configure fail2ban
+  hosts: all
+  become: true
+  vars:
+    f2b_bantime: "1h"
+    f2b_findtime: "10m"
+    f2b_maxretry: 5
+    f2b_backend: systemd
+    f2b_ignoreip:
+      - "127.0.0.1/8"
+      - "::1"
+    f2b_jails:
+      - name: sshd
+        enabled: true
+        port: ssh
+        filter: sshd
+        maxretry: 3
+      - name: nginx-http-auth
+        enabled: false
+        port: http,https
+        filter: nginx-http-auth
+
+  tasks:
+    - name: Install fail2ban
+      apt:
+        name: fail2ban
+        state: present
+        update_cache: true
+
+    - name: Write jail.local
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime   = {{ f2b_bantime }}
+          findtime  = {{ f2b_findtime }}
+          maxretry  = {{ f2b_maxretry }}
+          backend   = {{ f2b_backend }}
+          ignoreip  = {{ f2b_ignoreip | join(' ') }}
+
+          {% for jail in f2b_jails %}
+          [{{ jail.name }}]
+          enabled  = {{ jail.enabled | lower }}
+          port     = {{ jail.port }}
+          filter   = {{ jail.filter }}
+          {% if jail.maxretry is defined %}maxretry = {{ jail.maxretry }}{% endif %}
+
+          {% endfor %}
+      notify: Restart fail2ban
+
+    - name: Ensure fail2ban is started and enabled
+      service:
+        name: fail2ban
+        state: started
+        enabled: true
+
+    - name: Check fail2ban status
+      command: fail2ban-client status
+      register: f2b_status
+      changed_when: false
+
+    - name: Show fail2ban status
+      debug:
+        var: f2b_status.stdout_lines
+
+  handlers:
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted

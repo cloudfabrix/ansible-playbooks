@@ -1,0 +1,89 @@
+---
+# Playbook: Configure nginx as an HTTP load balancer
+# Usage: ansible-playbook 05_nginx_load_balancer.yml -i inventory.ini
+#        -e "backend_servers=['10.0.0.1:8080','10.0.0.2:8080']"
+
+- name: Configure nginx as a load balancer
+  hosts: all
+  become: true
+  vars:
+    lb_port: 80
+    upstream_name: backend_pool
+    lb_algorithm: least_conn     # round_robin (default), least_conn, ip_hash
+    backend_servers:
+      - "10.0.0.1:8080"
+      - "10.0.0.2:8080"
+      - "10.0.0.3:8080"
+    health_check_path: /health
+
+  tasks:
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Write load balancer config
+      copy:
+        dest: /etc/nginx/sites-available/loadbalancer
+        content: |
+          upstream {{ upstream_name }} {
+              {{ lb_algorithm }};
+          {% for server in backend_servers %}
+              server {{ server }};
+          {% endfor %}
+          }
+
+          server {
+              listen {{ lb_port }};
+
+              location / {
+                  proxy_pass http://{{ upstream_name }};
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_connect_timeout 10s;
+                  proxy_read_timeout 30s;
+              }
+
+              location {{ health_check_path }} {
+                  access_log off;
+                  return 200 "healthy\n";
+              }
+          }
+      notify: Reload nginx
+
+    - name: Enable site config
+      file:
+        src: /etc/nginx/sites-available/loadbalancer
+        dest: /etc/nginx/sites-enabled/loadbalancer
+        state: link
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Test nginx config
+      command: nginx -t
+      changed_when: false
+
+    - name: Ensure nginx is started and enabled
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Open load balancer port in UFW
+      ufw:
+        rule: allow
+        port: "{{ lb_port }}"
+        proto: tcp
+      ignore_errors: true
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

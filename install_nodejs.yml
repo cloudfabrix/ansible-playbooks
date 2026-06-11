@@ -1,0 +1,63 @@
+---
+# Playbook: Install Node.js via NodeSource binary distributions
+# Usage: ansible-playbook 12_install_nodejs.yml -i inventory.ini
+#        -e "node_major_version=20"
+
+- name: Install Node.js
+  hosts: all
+  become: true
+  vars:
+    node_major_version: "20"   # LTS: 18, 20, 22
+    install_yarn: true
+    install_pm2: true
+
+  tasks:
+    - name: Install curl and gnupg
+      apt:
+        name:
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Download and run NodeSource setup script
+      shell: >
+        curl -fsSL https://deb.nodesource.com/setup_{{ node_major_version }}.x | bash -
+      args:
+        creates: /etc/apt/sources.list.d/nodesource.list
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Install yarn globally
+      npm:
+        name: yarn
+        global: true
+        state: present
+      when: install_yarn
+
+    - name: Install PM2 process manager globally
+      npm:
+        name: pm2
+        global: true
+        state: present
+      when: install_pm2
+
+    - name: Verify Node.js version
+      command: node --version
+      register: node_ver
+      changed_when: false
+
+    - name: Verify npm version
+      command: npm --version
+      register: npm_ver
+      changed_when: false
+
+    - name: Show installed versions
+      debug:
+        msg:
+          - "Node.js: {{ node_ver.stdout }}"
+          - "npm: {{ npm_ver.stdout }}"

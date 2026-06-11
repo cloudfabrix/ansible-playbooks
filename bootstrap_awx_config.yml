@@ -1,0 +1,407 @@
+---
+# Playbook: Bootstrap AWX configuration via REST API
+#
+# Configures a freshly deployed AWX instance with:
+#   - Organization
+#   - Machine credentials (SSH key for target VMs)
+#   - GitHub project pointing at this playbook repo
+#   - Inventory with host groups matching inventory.ini
+#   - Job templates for every playbook in this repo
+#
+# Run AFTER 32_deploy_awx_instance.yml.
+#
+# Usage:
+#   ansible-playbook 33_bootstrap_awx_config.yml \
+#     -e "awx_url=http://NODE_IP:30080 awx_password=<password>" \
+#     -e "github_repo=https://github.com/yourorg/ansible-vm-playbooks.git" \
+#     -e "ssh_private_key_path=~/.ssh/id_rsa"
+
+- name: Bootstrap AWX configuration via REST API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    awx_url: "http://localhost:30080"       # AWX base URL (no trailing slash)
+    awx_user: "admin"
+    awx_password: "changeme"               # Pass via -e or vault
+
+    # GitHub repo containing the playbooks
+    github_repo: "https://github.com/yourorg/ansible-vm-playbooks.git"
+    github_branch: "main"
+    github_token: ""                       # Leave empty for public repos
+
+    # SSH private key content for connecting to managed VMs
+    # Pass as a string or read from file using lookup('file', path)
+    ssh_private_key_path: "~/.ssh/id_rsa"
+
+    # AWX object names
+    org_name: "VM Operations"
+    project_name: "VM Playbooks"
+    credential_name: "VM SSH Key"
+    inventory_name: "VM Inventory"
+
+    # VM groups and hosts to register in AWX inventory
+    # Mirrors inventory.ini
+    inventory_groups:
+      - name: web_servers
+        hosts:
+          - { name: web1, host: "192.168.1.10" }
+          - { name: web2, host: "192.168.1.11" }
+      - name: db_servers
+        hosts:
+          - { name: db1, host: "192.168.1.20" }
+      - name: app_servers
+        hosts:
+          - { name: app1, host: "192.168.1.30" }
+          - { name: app2, host: "192.168.1.31" }
+          - { name: app3, host: "192.168.1.32" }
+
+    # Job templates to create — one per playbook
+    # limit/extra_vars can be overridden at launch time via the API
+    job_templates:
+      - name: "Enable Firewall"
+        playbook: "01_enable_firewall.yml"
+        extra_vars: "allowed_ports: ['22','80','443']"
+      - name: "Add Firewall Ports"
+        playbook: "02_add_firewall_ports.yml"
+        extra_vars: "ports_to_add:\n  - port: '8080'\n    proto: tcp"
+      - name: "Remove Firewall Ports"
+        playbook: "03_remove_firewall_ports.yml"
+        extra_vars: "ports_to_remove:\n  - port: '8080'\n    proto: tcp"
+      - name: "Install Nginx"
+        playbook: "04_install_nginx.yml"
+        extra_vars: ""
+      - name: "Configure Nginx Load Balancer"
+        playbook: "05_nginx_load_balancer.yml"
+        extra_vars: "backend_servers:\n  - '10.0.0.1:8080'"
+      - name: "Run HTTP Server"
+        playbook: "06_run_http_server.yml"
+        extra_vars: "http_port: 8000"
+      - name: "Install APT Package"
+        playbook: "07_apt_install_package.yml"
+        extra_vars: "packages:\n  - htop\n  - curl"
+      - name: "Install Python 3.12"
+        playbook: "08_install_python312.yml"
+        extra_vars: ""
+      - name: "Create System User"
+        playbook: "09_create_user.yml"
+        extra_vars: "new_user: deploy"
+      - name: "Install Docker"
+        playbook: "10_install_docker.yml"
+        extra_vars: ""
+      - name: "Deploy Docker Container"
+        playbook: "11_deploy_docker_container.yml"
+        extra_vars: "image: nginx:latest\ncontainer_name: web\nhost_port: 8080"
+      - name: "Install Node.js"
+        playbook: "12_install_nodejs.yml"
+        extra_vars: "node_major_version: '20'"
+      - name: "Setup PostgreSQL"
+        playbook: "13_setup_postgresql.yml"
+        extra_vars: "db_name: myapp\ndb_user: myapp\ndb_password: changeme"
+      - name: "Setup Redis"
+        playbook: "14_setup_redis.yml"
+        extra_vars: ""
+      - name: "Install Certbot SSL"
+        playbook: "15_install_certbot_ssl.yml"
+        extra_vars: "domain: example.com\nemail: admin@example.com"
+      - name: "Setup Fail2ban"
+        playbook: "16_setup_fail2ban.yml"
+        extra_vars: ""
+      - name: "System Update and Reboot"
+        playbook: "17_system_update_reboot.yml"
+        extra_vars: "force_reboot: false"
+      - name: "Install Prometheus Node Exporter"
+        playbook: "18_install_prometheus_node_exporter.yml"
+        extra_vars: ""
+      - name: "OS Hardening Baseline"
+        playbook: "19_os_hardening_baseline.yml"
+        extra_vars: ""
+      - name: "Setup Swap"
+        playbook: "20_setup_swap.yml"
+        extra_vars: "swap_size_mb: 2048"
+      - name: "Deploy Static Website"
+        playbook: "21_deploy_static_website.yml"
+        extra_vars: "domain: mysite.com"
+      - name: "Install Java"
+        playbook: "22_install_java.yml"
+        extra_vars: "java_version: '21'"
+      - name: "Setup Cron Job"
+        playbook: "23_setup_cron_job.yml"
+        extra_vars: ""
+      - name: "Configure Logrotate"
+        playbook: "24_configure_logrotate.yml"
+        extra_vars: ""
+      - name: "Backup to S3"
+        playbook: "25_backup_to_s3.yml"
+        extra_vars: "s3_bucket: my-backup-bucket\naws_region: us-east-1"
+      - name: "Setup WireGuard VPN"
+        playbook: "26_setup_wireguard_vpn.yml"
+        extra_vars: ""
+      - name: "Mount NFS Share"
+        playbook: "27_mount_nfs_share.yml"
+        extra_vars: "nfs_server: 10.0.0.10\nnfs_export: /exports/shared"
+      - name: "Configure NTP"
+        playbook: "28_configure_ntp.yml"
+        extra_vars: "timezone: UTC"
+      - name: "Deploy App with Docker Compose"
+        playbook: "29_deploy_app_with_docker_compose.yml"
+        extra_vars: "app_name: myapp"
+      - name: "Rolling Zero-Downtime Deploy"
+        playbook: "30_rolling_deploy_zero_downtime.yml"
+        extra_vars: "app_version: 1.0.0\nartifact_url: https://releases.example.com/app-1.0.0.tar.gz"
+
+  tasks:
+    - name: Set API base URL
+      set_fact:
+        api: "{{ awx_url }}/api/v2"
+        auth:
+          user: "{{ awx_user }}"
+          password: "{{ awx_password }}"
+
+    # ── Wait for AWX API to be ready ──────────────────────────────────────
+
+    - name: Wait for AWX API to respond
+      uri:
+        url: "{{ api }}/ping/"
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        status_code: 200
+      register: ping_result
+      retries: 20
+      delay: 15
+      until: ping_result.status == 200
+
+    # ── Organization ──────────────────────────────────────────────────────
+
+    - name: Create organization
+      uri:
+        url: "{{ api }}/organizations/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ org_name }}"
+          description: "VM Operations organization"
+        status_code: [200, 201]
+      register: org_result
+      changed_when: org_result.status == 201
+
+    - name: Set org ID
+      set_fact:
+        org_id: "{{ org_result.json.id }}"
+
+    # ── SSH Machine Credential ────────────────────────────────────────────
+
+    - name: Read SSH private key
+      set_fact:
+        ssh_key_content: "{{ lookup('file', ssh_private_key_path | expanduser) }}"
+
+    - name: Create machine credential (SSH key)
+      uri:
+        url: "{{ api }}/credentials/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ credential_name }}"
+          organization: "{{ org_id }}"
+          credential_type: 1       # 1 = Machine credential
+          inputs:
+            username: ubuntu
+            ssh_key_data: "{{ ssh_key_content }}"
+        status_code: [200, 201]
+      register: cred_result
+      changed_when: cred_result.status == 201
+
+    - name: Set credential ID
+      set_fact:
+        cred_id: "{{ cred_result.json.id }}"
+
+    # ── Source Control Credential (private repos only) ────────────────────
+
+    - name: Create GitHub token credential (if provided)
+      uri:
+        url: "{{ api }}/credentials/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "GitHub Token"
+          organization: "{{ org_id }}"
+          credential_type: 2       # 2 = Source Control
+          inputs:
+            password: "{{ github_token }}"
+        status_code: [200, 201]
+      register: scm_cred_result
+      when: github_token | length > 0
+      changed_when: scm_cred_result.status == 201
+
+    - name: Set SCM credential ID
+      set_fact:
+        scm_cred_id: "{{ scm_cred_result.json.id | default('') }}"
+      when: github_token | length > 0
+
+    # ── Project ───────────────────────────────────────────────────────────
+
+    - name: Create project from GitHub repo
+      uri:
+        url: "{{ api }}/projects/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ project_name }}"
+          organization: "{{ org_id }}"
+          scm_type: git
+          scm_url: "{{ github_repo }}"
+          scm_branch: "{{ github_branch }}"
+          scm_credential: "{{ scm_cred_id | default(omit) }}"
+          scm_update_on_launch: true
+          scm_clean: true
+        status_code: [200, 201]
+      register: project_result
+      changed_when: project_result.status == 201
+
+    - name: Set project ID
+      set_fact:
+        project_id: "{{ project_result.json.id }}"
+
+    - name: Wait for initial project sync to complete
+      uri:
+        url: "{{ api }}/projects/{{ project_id }}/"
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        status_code: 200
+      register: project_status
+      retries: 20
+      delay: 10
+      until: project_status.json.scm_revision is defined and project_status.json.last_job_run is not none
+
+    # ── Inventory ─────────────────────────────────────────────────────────
+
+    - name: Create inventory
+      uri:
+        url: "{{ api }}/inventories/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ inventory_name }}"
+          organization: "{{ org_id }}"
+          description: "VM inventory managed by Ansible"
+        status_code: [200, 201]
+      register: inventory_result
+      changed_when: inventory_result.status == 201
+
+    - name: Set inventory ID
+      set_fact:
+        inventory_id: "{{ inventory_result.json.id }}"
+
+    - name: Create inventory groups
+      uri:
+        url: "{{ api }}/groups/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          inventory: "{{ inventory_id }}"
+        status_code: [200, 201]
+      loop: "{{ inventory_groups }}"
+      register: group_results
+      changed_when: group_results.results | selectattr('status', 'equalto', 201) | list | length > 0
+
+    - name: Build group ID map
+      set_fact:
+        group_id_map: >-
+          {{ group_id_map | default({}) | combine({item.item.name: item.json.id}) }}
+      loop: "{{ group_results.results }}"
+
+    - name: Create hosts and add to groups
+      uri:
+        url: "{{ api }}/hosts/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ host_item.name }}"
+          inventory: "{{ inventory_id }}"
+          variables: "ansible_host: {{ host_item.host }}"
+        status_code: [200, 201]
+      loop: "{{ inventory_groups | subelements('hosts') }}"
+      loop_control:
+        loop_var: group_host_pair
+      vars:
+        host_item: "{{ group_host_pair[1] }}"
+      register: host_results
+      changed_when: host_results.results | selectattr('status', 'equalto', 201) | list | length > 0
+
+    # ── Job Templates ─────────────────────────────────────────────────────
+
+    - name: Create job templates for all playbooks
+      uri:
+        url: "{{ api }}/job_templates/"
+        method: POST
+        user: "{{ awx_user }}"
+        password: "{{ awx_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          job_type: run
+          inventory: "{{ inventory_id }}"
+          project: "{{ project_id }}"
+          playbook: "{{ item.playbook }}"
+          credential: "{{ cred_id }}"
+          extra_vars: "{{ item.extra_vars }}"
+          ask_limit_on_launch: true      # Allow limiting to a host/group per launch
+          ask_variables_on_launch: true  # Allow overriding extra_vars per launch
+          ask_tags_on_launch: true
+        status_code: [200, 201]
+      loop: "{{ job_templates }}"
+      register: template_results
+      changed_when: template_results.results | selectattr('status', 'equalto', 201) | list | length > 0
+
+    - name: Build job template ID map
+      set_fact:
+        jt_id_map: >-
+          {{ jt_id_map | default({}) | combine({item.item.name: item.json.id}) }}
+      loop: "{{ template_results.results }}"
+
+    # ── Summary ───────────────────────────────────────────────────────────
+
+    - name: Print summary
+      debug:
+        msg:
+          - "========================================"
+          - " AWX Bootstrap Complete"
+          - "========================================"
+          - " Organization : {{ org_name }} (id={{ org_id }})"
+          - " Project      : {{ project_name }} (id={{ project_id }})"
+          - " Inventory    : {{ inventory_name }} (id={{ inventory_id }})"
+          - " Credential   : {{ credential_name }} (id={{ cred_id }})"
+          - " Job Templates: {{ template_results.results | length }} created"
+          - "========================================"
+          - " REST API examples:"
+          - "   List templates : GET  {{ api }}/job_templates/"
+          - "   Launch a job   : POST {{ api }}/job_templates/<id>/launch/"
+          - "   Job status     : GET  {{ api }}/jobs/<job_id>/"
+          - "   Job output     : GET  {{ api }}/jobs/<job_id>/stdout/?format=txt"
+          - "========================================"

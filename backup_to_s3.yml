@@ -1,0 +1,84 @@
+---
+# Playbook: Back up directories to S3 using awscli
+# Usage: ansible-playbook 25_backup_to_s3.yml -i inventory.ini
+#        -e "s3_bucket=my-backups aws_region=us-east-1"
+
+- name: Back up files to Amazon S3
+  hosts: all
+  become: true
+  vars:
+    s3_bucket: "my-backup-bucket"
+    aws_region: "us-east-1"
+    backup_dirs:
+      - /etc
+      - /var/lib/postgresql
+      - /opt/myapp
+    s3_prefix: "backups/{{ inventory_hostname }}"
+    retention_days: 30
+    aws_access_key: ""          # Prefer IAM instance roles; use ansible-vault if keys needed
+    aws_secret_key: ""
+    compress_before_upload: true
+    tmp_dir: /tmp/ansible_backups
+
+  tasks:
+    - name: Install awscli and required tools
+      apt:
+        name:
+          - awscli
+          - tar
+          - pigz
+        state: present
+        update_cache: true
+
+    - name: Create temp backup directory
+      file:
+        path: "{{ tmp_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create dated tarball for each backup directory
+      shell: |
+        BASENAME=$(echo "{{ item }}" | tr '/' '_' | sed 's/^_//')
+        DATESTAMP=$(date +%Y%m%d_%H%M%S)
+        ARCHIVE="{{ tmp_dir }}/${BASENAME}_${DATESTAMP}.tar.gz"
+        tar -czf "${ARCHIVE}" {{ item }} 2>/dev/null || true
+        echo "${ARCHIVE}"
+      args:
+        executable: /bin/bash
+      loop: "{{ backup_dirs }}"
+      register: archive_results
+      changed_when: true
+
+    - name: Upload archives to S3
+      shell: |
+        aws s3 cp {{ item.stdout }} s3://{{ s3_bucket }}/{{ s3_prefix }}/
+        {% if aws_access_key | length > 0 %}
+        export AWS_ACCESS_KEY_ID="{{ aws_access_key }}"
+        export AWS_SECRET_ACCESS_KEY="{{ aws_secret_key }}"
+        {% endif %}
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+      loop: "{{ archive_results.results }}"
+      when: item.stdout | length > 0
+
+    - name: Remove old backups from S3 (lifecycle via policy preferred; this is a fallback)
+      shell: |
+        aws s3 ls s3://{{ s3_bucket }}/{{ s3_prefix }}/ | \
+        awk '{print $4}' | while read key; do
+          FILE_DATE=$(echo $key | grep -oP '\d{8}')
+          if [ ! -z "$FILE_DATE" ]; then
+            DAYS_OLD=$(( ( $(date +%s) - $(date -d "$FILE_DATE" +%s) ) / 86400 ))
+            if [ "$DAYS_OLD" -gt "{{ retention_days }}" ]; then
+              aws s3 rm s3://{{ s3_bucket }}/{{ s3_prefix }}/$key
+            fi
+          fi
+        done
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+      changed_when: false
+      ignore_errors: true
+
+    - name: Clean up local temp archives
+      file:
+        path: "{{ tmp_dir }}"
+        state: absent

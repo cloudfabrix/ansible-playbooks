@@ -1,0 +1,56 @@
+---
+# Playbook: Install Python 3.12 on Ubuntu/Debian via deadsnakes PPA
+# Usage: ansible-playbook 08_install_python312.yml -i inventory.ini
+
+- name: Install Python 3.12
+  hosts: all
+  become: true
+  vars:
+    python_version: "3.12"
+    set_as_default: false   # Set to true to update-alternatives
+
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - software-properties-common
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Add deadsnakes PPA
+      apt_repository:
+        repo: ppa:deadsnakes/ppa
+        state: present
+        update_cache: true
+
+    - name: Install Python {{ python_version }} and extras
+      apt:
+        name:
+          - "python{{ python_version }}"
+          - "python{{ python_version }}-venv"
+          - "python{{ python_version }}-dev"
+          - "python{{ python_version }}-distutils"
+        state: present
+
+    - name: Install pip for Python {{ python_version }}
+      shell: |
+        curl -sS https://bootstrap.pypa.io/get-pip.py | python{{ python_version }}
+      args:
+        creates: "/usr/local/lib/python{{ python_version }}/dist-packages/pip"
+
+    - name: Set Python {{ python_version }} as default python3 (optional)
+      alternatives:
+        name: python3
+        path: "/usr/bin/python{{ python_version }}"
+        priority: 100
+      when: set_as_default
+
+    - name: Verify installation
+      command: "python{{ python_version }} --version"
+      register: python_ver
+      changed_when: false
+
+    - name: Show Python version
+      debug:
+        msg: "Installed: {{ python_ver.stdout }}"

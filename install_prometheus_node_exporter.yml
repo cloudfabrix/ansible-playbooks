@@ -1,0 +1,96 @@
+---
+# Playbook: Install Prometheus node_exporter for system metrics
+# Usage: ansible-playbook 18_install_prometheus_node_exporter.yml -i inventory.ini
+
+- name: Install Prometheus node_exporter
+  hosts: all
+  become: true
+  vars:
+    node_exporter_version: "1.8.1"
+    node_exporter_port: 9100
+    node_exporter_user: node_exporter
+    prometheus_scrape_cidr: "10.0.0.0/8"   # restrict UFW rule to this CIDR
+
+  tasks:
+    - name: Create node_exporter system user
+      user:
+        name: "{{ node_exporter_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Download node_exporter archive
+      get_url:
+        url: >-
+          https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz
+        dest: /tmp/node_exporter.tar.gz
+        mode: "0644"
+
+    - name: Extract node_exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp/
+        remote_src: true
+
+    - name: Install node_exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        remote_src: true
+        owner: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_user }}"
+        mode: "0755"
+      notify: Restart node_exporter
+
+    - name: Create systemd unit for node_exporter
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Prometheus Node Exporter
+          After=network.target
+
+          [Service]
+          User={{ node_exporter_user }}
+          ExecStart=/usr/local/bin/node_exporter \
+            --web.listen-address=:{{ node_exporter_port }} \
+            --collector.systemd \
+            --collector.processes
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd
+        - Restart node_exporter
+
+    - name: Allow node_exporter port from Prometheus subnet
+      ufw:
+        rule: allow
+        port: "{{ node_exporter_port }}"
+        proto: tcp
+        src: "{{ prometheus_scrape_cidr }}"
+      ignore_errors: true
+
+    - name: Enable and start node_exporter
+      service:
+        name: node_exporter
+        state: started
+        enabled: true
+
+    - name: Verify metrics endpoint
+      uri:
+        url: "http://localhost:{{ node_exporter_port }}/metrics"
+        status_code: 200
+      retries: 5
+      delay: 3
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: Restart node_exporter
+      service:
+        name: node_exporter
+        state: restarted

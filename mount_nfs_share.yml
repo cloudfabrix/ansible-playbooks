@@ -1,0 +1,56 @@
+---
+# Playbook: Mount an NFS share and persist across reboots
+# Usage: ansible-playbook 27_mount_nfs_share.yml -i inventory.ini
+#        -e "nfs_server=10.0.0.10 nfs_export=/data mount_point=/mnt/data"
+
+- name: Mount an NFS share
+  hosts: all
+  become: true
+  vars:
+    nfs_server: "10.0.0.10"
+    nfs_export: "/exports/shared"
+    mount_point: "/mnt/nfs_share"
+    nfs_options: "rw,sync,hard,intr,noatime"
+    nfs_version: "4"
+
+  tasks:
+    - name: Install NFS client utilities
+      apt:
+        name:
+          - nfs-common
+          - nfs4-acl-tools
+        state: present
+        update_cache: true
+
+    - name: Create mount point
+      file:
+        path: "{{ mount_point }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount NFS share temporarily (verify connectivity)
+      mount:
+        path: "{{ mount_point }}"
+        src: "{{ nfs_server }}:{{ nfs_export }}"
+        fstype: "nfs{{ nfs_version }}"
+        opts: "{{ nfs_options }}"
+        state: mounted
+
+    - name: Verify NFS mount is accessible
+      command: "ls {{ mount_point }}"
+      register: nfs_ls
+      changed_when: false
+
+    - name: Show NFS contents
+      debug:
+        msg: "{{ nfs_ls.stdout_lines }}"
+
+    - name: Persist mount in /etc/fstab
+      mount:
+        path: "{{ mount_point }}"
+        src: "{{ nfs_server }}:{{ nfs_export }}"
+        fstype: "nfs{{ nfs_version }}"
+        opts: "{{ nfs_options }}"
+        dump: "0"
+        passno: "0"
+        state: present

@@ -1,0 +1,206 @@
+---
+# Playbook: Deploy an AWX instance using the AWX Operator
+#
+# Run AFTER 31_install_awx_operator.yml.
+# Creates the AWX custom resource, waits for full deployment,
+# retrieves the generated admin password, and exposes the UI/API
+# via Ingress or NodePort.
+#
+# Usage:
+#   ansible-playbook 32_deploy_awx_instance.yml
+#   ansible-playbook 32_deploy_awx_instance.yml \
+#     -e "awx_hostname=awx.example.com expose_method=ingress"
+
+- name: Deploy AWX instance
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    awx_namespace: "awx"
+    awx_instance_name: "awx"
+    kubectl_context: ""
+
+    # Storage — use a StorageClass that supports ReadWriteOnce on your cluster
+    # Common values: standard, gp2, gp3, managed-csi, longhorn
+    storage_class: "standard"
+    postgres_storage_size: "8Gi"
+    projects_storage_size: "8Gi"
+
+    # Exposure: "ingress" (requires an ingress controller) or "nodeport"
+    expose_method: "nodeport"
+    awx_hostname: "awx.example.com"       # Used when expose_method=ingress
+    ingress_class: "nginx"                 # Ingress class name
+    nodeport_port: 30080                   # Used when expose_method=nodeport
+
+    # Resource requests/limits (tune for your cluster size)
+    web_resource_requests:
+      cpu: "250m"
+      memory: "1Gi"
+    task_resource_requests:
+      cpu: "250m"
+      memory: "2Gi"
+
+  tasks:
+    # ── AWX Custom Resource ───────────────────────────────────────────────
+
+    - name: Write AWX instance manifest
+      copy:
+        dest: /tmp/awx-instance.yaml
+        content: |
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: {{ awx_instance_name }}
+            namespace: {{ awx_namespace }}
+          spec:
+            # Admin credentials — password is auto-generated if omitted
+            admin_user: admin
+
+            # Storage
+            postgres_storage_class: {{ storage_class }}
+            postgres_storage_requirements:
+              requests:
+                storage: {{ postgres_storage_size }}
+            projects_storage_class: {{ storage_class }}
+            projects_storage_size: {{ projects_storage_size }}
+            projects_persistence: true
+
+            # Resource limits
+            web_resource_requirements:
+              requests:
+                cpu: {{ web_resource_requests.cpu }}
+                memory: {{ web_resource_requests.memory }}
+            task_resource_requirements:
+              requests:
+                cpu: {{ task_resource_requests.cpu }}
+                memory: {{ task_resource_requests.memory }}
+
+            {% if expose_method == 'nodeport' %}
+            # NodePort exposure
+            service_type: NodePort
+            nodeport_port: {{ nodeport_port }}
+            {% else %}
+            # ClusterIP + Ingress exposure
+            service_type: ClusterIP
+            ingress_type: ingress
+            hostname: {{ awx_hostname }}
+            ingress_class_name: {{ ingress_class }}
+            ingress_annotations: |
+              nginx.ingress.kubernetes.io/proxy-body-size: "0"
+              nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+            {% endif %}
+
+    - name: Apply AWX instance manifest
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        apply -f /tmp/awx-instance.yaml
+      register: awx_apply
+      changed_when: "'created' in awx_apply.stdout or 'configured' in awx_apply.stdout"
+
+    - name: Show apply result
+      debug:
+        var: awx_apply.stdout_lines
+
+    # ── Wait for AWX to be fully deployed ─────────────────────────────────
+    # AWX takes 5–10 minutes to pull images and initialise the database
+
+    - name: Wait for AWX web deployment to exist (operator may take 2 min to create it)
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        get deployment {{ awx_instance_name }}-web
+      register: web_deploy_check
+      retries: 24
+      delay: 15
+      until: web_deploy_check.rc == 0
+      changed_when: false
+
+    - name: Wait for AWX web deployment to be fully available (up to 15 min)
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        rollout status deployment/{{ awx_instance_name }}-web
+        --timeout=900s
+      register: web_rollout
+      changed_when: false
+
+    - name: Wait for AWX task deployment to be fully available
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        rollout status deployment/{{ awx_instance_name }}-task
+        --timeout=900s
+      register: task_rollout
+      changed_when: false
+
+    # ── Retrieve admin password ───────────────────────────────────────────
+
+    - name: Get admin password from Kubernetes secret
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        get secret {{ awx_instance_name }}-admin-password
+        -o jsonpath='{.data.password}'
+      register: admin_password_b64
+      changed_when: false
+
+    - name: Decode admin password
+      set_fact:
+        awx_admin_password: "{{ admin_password_b64.stdout | b64decode }}"
+
+    # ── Get access URL ────────────────────────────────────────────────────
+
+    - name: Get NodePort service details
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        get svc {{ awx_instance_name }}-service
+        -o jsonpath='{.spec.ports[0].nodePort}'
+      register: nodeport_info
+      changed_when: false
+      when: expose_method == 'nodeport'
+
+    - name: Get a cluster node IP (for NodePort access)
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}'
+      register: node_ip
+      changed_when: false
+      when: expose_method == 'nodeport'
+
+    # ── Summary ───────────────────────────────────────────────────────────
+
+    - name: Print AWX access details
+      debug:
+        msg:
+          - "============================================"
+          - " AWX deployment complete!"
+          - "============================================"
+          - "  UI / API URL (NodePort): http://{{ node_ip.stdout | default('NODE_IP') }}:{{ nodeport_info.stdout | default(nodeport_port) }}"
+          - "  UI / API URL (Ingress):  https://{{ awx_hostname }}"
+          - "  Admin username: admin"
+          - "  Admin password: {{ awx_admin_password }}"
+          - ""
+          - "  REST API base: <url>/api/v2/"
+          - "  API browser:   <url>/api/v2/?format=api"
+          - "============================================"
+          - "  Next step: run 33_bootstrap_awx_config.yml"
+          - "============================================"
+
+    - name: Save credentials to file (chmod 600)
+      copy:
+        dest: /tmp/awx_credentials.txt
+        content: |
+          AWX Admin Credentials
+          =====================
+          URL (NodePort): http://{{ node_ip.stdout | default('NODE_IP') }}:{{ nodeport_info.stdout | default(nodeport_port) }}
+          URL (Ingress):  https://{{ awx_hostname }}
+          Username: admin
+          Password: {{ awx_admin_password }}
+        mode: "0600"
+
+    - name: Clean up temp manifest
+      file:
+        path: /tmp/awx-instance.yaml
+        state: absent

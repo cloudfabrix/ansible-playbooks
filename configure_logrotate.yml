@@ -1,0 +1,66 @@
+---
+# Playbook: Configure logrotate for application or system logs
+# Usage: ansible-playbook 24_configure_logrotate.yml -i inventory.ini
+
+- name: Configure logrotate
+  hosts: all
+  become: true
+  vars:
+    logrotate_configs:
+      - name: myapp
+        path: /var/log/myapp/*.log
+        options:
+          - daily
+          - rotate 14
+          - compress
+          - delaycompress
+          - missingok
+          - notifempty
+          - create 0640 www-data adm
+          - sharedscripts
+        postrotate: "systemctl reload myapp || true"
+
+      - name: nginx
+        path: /var/log/nginx/*.log
+        options:
+          - weekly
+          - rotate 52
+          - compress
+          - delaycompress
+          - missingok
+          - notifempty
+          - create 0640 www-data adm
+          - sharedscripts
+        postrotate: "[ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)"
+
+  tasks:
+    - name: Ensure logrotate is installed
+      apt:
+        name: logrotate
+        state: present
+
+    - name: Write logrotate config files
+      copy:
+        dest: "/etc/logrotate.d/{{ item.name }}"
+        content: |
+          {{ item.path }} {
+          {% for opt in item.options %}
+              {{ opt }}
+          {% endfor %}
+          {% if item.postrotate is defined %}
+              postrotate
+                  {{ item.postrotate }}
+              endscript
+          {% endif %}
+          }
+        mode: "0644"
+      loop: "{{ logrotate_configs }}"
+
+    - name: Test logrotate config
+      command: logrotate --debug /etc/logrotate.conf
+      register: logrotate_debug
+      changed_when: false
+
+    - name: Show logrotate test output
+      debug:
+        var: logrotate_debug.stdout_lines

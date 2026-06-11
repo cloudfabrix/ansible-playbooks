@@ -1,0 +1,50 @@
+---
+# Playbook: Enable UFW firewall and open specified ports
+# Usage: ansible-playbook 01_enable_firewall.yml -i inventory.ini
+#        -e "allowed_ports=[22,80,443]"
+
+- name: Enable UFW firewall with specified ports
+  hosts: all
+  become: true
+  vars:
+    allowed_ports:
+      - "22"
+      - "80"
+      - "443"
+
+  tasks:
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+        update_cache: true
+
+    - name: Set UFW default incoming policy to deny
+      ufw:
+        default: deny
+        direction: incoming
+
+    - name: Set UFW default outgoing policy to allow
+      ufw:
+        default: allow
+        direction: outgoing
+
+    - name: Allow specified TCP ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ allowed_ports }}"
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+    - name: Show UFW status
+      command: ufw status verbose
+      register: ufw_status
+      changed_when: false
+
+    - name: Print UFW status
+      debug:
+        var: ufw_status.stdout_lines

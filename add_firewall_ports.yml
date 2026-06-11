@@ -1,0 +1,37 @@
+---
+# Playbook: Add ports to UFW firewall
+# Usage: ansible-playbook 02_add_firewall_ports.yml -i inventory.ini
+#        -e "ports_to_add=[8080,9090]"
+
+- name: Add ports to UFW firewall
+  hosts: all
+  become: true
+  vars:
+    ports_to_add:
+      - port: "8080"
+        proto: tcp
+      - port: "9090"
+        proto: tcp
+
+  tasks:
+    - name: Ensure UFW is installed
+      apt:
+        name: ufw
+        state: present
+
+    - name: Allow new ports through UFW
+      ufw:
+        rule: allow
+        port: "{{ item.port }}"
+        proto: "{{ item.proto }}"
+      loop: "{{ ports_to_add }}"
+      notify: Reload UFW
+
+    - name: Ensure UFW is enabled
+      ufw:
+        state: enabled
+
+  handlers:
+    - name: Reload UFW
+      command: ufw reload
+      changed_when: true

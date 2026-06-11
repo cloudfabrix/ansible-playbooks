@@ -1,0 +1,57 @@
+---
+# Playbook: Full system update with conditional reboot if required
+# Usage: ansible-playbook 17_system_update_reboot.yml -i inventory.ini
+
+- name: Full system update with conditional reboot
+  hosts: all
+  become: true
+  vars:
+    reboot_timeout: 300          # seconds to wait for host to come back
+    force_reboot: false          # force reboot even if not required
+    pre_update_snapshot: false   # placeholder for cloud snapshot hooks
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: 0   # force refresh
+
+    - name: Upgrade all packages (dist-upgrade)
+      apt:
+        upgrade: dist
+      register: upgrade_result
+
+    - name: Remove unused packages
+      apt:
+        autoremove: true
+        autoclean: true
+
+    - name: Check if reboot is required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required_file
+
+    - name: Print upgrade summary
+      debug:
+        msg: >
+          Upgraded {{ upgrade_result.stdout | regex_findall('upgraded') | length }} packages.
+          Reboot required: {{ reboot_required_file.stat.exists }}.
+
+    - name: Reboot if required (or forced)
+      reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+        msg: "Rebooting after system update"
+      when: reboot_required_file.stat.exists or force_reboot
+
+    - name: Verify system is back online
+      wait_for_connection:
+        timeout: "{{ reboot_timeout }}"
+
+    - name: Show kernel version post-update
+      command: uname -r
+      register: kernel_ver
+      changed_when: false
+
+    - name: Display kernel version
+      debug:
+        msg: "Running kernel: {{ kernel_ver.stdout }}"

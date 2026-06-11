@@ -1,0 +1,58 @@
+---
+# Playbook: Schedule a recurring cron job for a given user
+# Usage: ansible-playbook 23_setup_cron_job.yml -i inventory.ini
+#        -e "cron_job_name='backup' cron_command='/opt/scripts/backup.sh'"
+
+- name: Set up a cron job
+  hosts: all
+  become: true
+  vars:
+    cron_jobs:
+      - name: "Daily DB backup"
+        user: root
+        minute: "0"
+        hour: "2"
+        day: "*"
+        month: "*"
+        weekday: "*"
+        job: "/opt/scripts/backup.sh >> /var/log/backup.log 2>&1"
+        state: present
+
+      - name: "Weekly log cleanup"
+        user: root
+        minute: "30"
+        hour: "3"
+        day: "*"
+        month: "*"
+        weekday: "0"
+        job: "find /var/log -name '*.gz' -mtime +30 -delete"
+        state: present
+
+  tasks:
+    - name: Ensure cron is installed
+      apt:
+        name: cron
+        state: present
+
+    - name: Create/update cron jobs
+      cron:
+        name: "{{ item.name }}"
+        user: "{{ item.user }}"
+        minute: "{{ item.minute }}"
+        hour: "{{ item.hour }}"
+        day: "{{ item.day }}"
+        month: "{{ item.month }}"
+        weekday: "{{ item.weekday }}"
+        job: "{{ item.job }}"
+        state: "{{ item.state }}"
+      loop: "{{ cron_jobs }}"
+
+    - name: List crontab for root
+      command: crontab -l -u root
+      register: crontab_output
+      changed_when: false
+      failed_when: false
+
+    - name: Show crontab
+      debug:
+        var: crontab_output.stdout_lines

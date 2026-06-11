@@ -1,0 +1,68 @@
+---
+# Playbook: Pull and run a Docker container with health-check awareness
+# Usage: ansible-playbook 11_deploy_docker_container.yml -i inventory.ini
+#        -e "image=nginx:latest container_name=web host_port=8080"
+
+- name: Deploy a Docker container
+  hosts: all
+  become: true
+  vars:
+    image: "nginx:latest"
+    container_name: "web"
+    host_port: 8080
+    container_port: 80
+    restart_policy: unless-stopped
+    env_vars: {}          # e.g. {ENV_VAR: value}
+    volumes: []           # e.g. ["/host/path:/container/path"]
+    memory_limit: "256m"
+    cpu_shares: 512
+
+  tasks:
+    - name: Ensure Docker is running
+      service:
+        name: docker
+        state: started
+
+    - name: Pull image {{ image }}
+      community.docker.docker_image:
+        name: "{{ image }}"
+        source: pull
+        force_source: true
+
+    - name: Stop existing container if running
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: stopped
+      ignore_errors: true
+
+    - name: Run container {{ container_name }}
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ image }}"
+        state: started
+        restart_policy: "{{ restart_policy }}"
+        ports:
+          - "{{ host_port }}:{{ container_port }}"
+        env: "{{ env_vars }}"
+        volumes: "{{ volumes }}"
+        memory: "{{ memory_limit }}"
+        cpu_shares: "{{ cpu_shares }}"
+
+    - name: Allow container port through UFW
+      ufw:
+        rule: allow
+        port: "{{ host_port }}"
+        proto: tcp
+      ignore_errors: true
+
+    - name: Wait for container to become healthy
+      community.docker.docker_container_info:
+        name: "{{ container_name }}"
+      register: container_info
+      retries: 10
+      delay: 5
+      until: container_info.container.State.Running
+
+    - name: Show container status
+      debug:
+        msg: "Container {{ container_name }} is {{ container_info.container.State.Status }}"

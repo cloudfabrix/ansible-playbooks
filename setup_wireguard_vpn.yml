@@ -1,0 +1,108 @@
+---
+# Playbook: Install and configure WireGuard VPN server
+# Usage: ansible-playbook 26_setup_wireguard_vpn.yml -i inventory.ini
+#        -e "wg_server_private_key=<key> wg_server_public_key=<key>"
+
+- name: Set up WireGuard VPN server
+  hosts: all
+  become: true
+  vars:
+    wg_interface: wg0
+    wg_port: 51820
+    wg_server_address: "10.8.0.1/24"
+    wg_server_private_key: ""    # Generate: wg genkey
+    wg_server_public_key: ""     # Generate: echo <private_key> | wg pubkey
+    wg_dns: "1.1.1.1"
+    wg_peers: []
+    # Example peer:
+    # - name: laptop
+    #   public_key: "ABC123..."
+    #   allowed_ips: "10.8.0.2/32"
+
+  tasks:
+    - name: Install WireGuard
+      apt:
+        name:
+          - wireguard
+          - wireguard-tools
+        state: present
+        update_cache: true
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        reload: true
+
+    - name: Generate server private key if not provided
+      command: wg genkey
+      register: generated_private_key
+      changed_when: true
+      when: wg_server_private_key | length == 0
+
+    - name: Set private key fact
+      set_fact:
+        wg_server_private_key: "{{ generated_private_key.stdout }}"
+      when: wg_server_private_key | length == 0
+
+    - name: Derive public key from private key
+      shell: "echo '{{ wg_server_private_key }}' | wg pubkey"
+      register: derived_public_key
+      changed_when: false
+      when: wg_server_public_key | length == 0
+
+    - name: Set public key fact
+      set_fact:
+        wg_server_public_key: "{{ derived_public_key.stdout }}"
+      when: wg_server_public_key | length == 0
+
+    - name: Create /etc/wireguard directory
+      file:
+        path: /etc/wireguard
+        state: directory
+        mode: "0700"
+
+    - name: Write WireGuard server config
+      copy:
+        dest: "/etc/wireguard/{{ wg_interface }}.conf"
+        mode: "0600"
+        content: |
+          [Interface]
+          Address = {{ wg_server_address }}
+          ListenPort = {{ wg_port }}
+          PrivateKey = {{ wg_server_private_key }}
+          PostUp   = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $(ip route | awk '/^default/{print $5}') -j MASQUERADE
+          PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $(ip route | awk '/^default/{print $5}') -j MASQUERADE
+
+          {% for peer in wg_peers %}
+          # Peer: {{ peer.name }}
+          [Peer]
+          PublicKey = {{ peer.public_key }}
+          AllowedIPs = {{ peer.allowed_ips }}
+          {% endfor %}
+      notify: Restart WireGuard
+
+    - name: Open WireGuard UDP port in UFW
+      ufw:
+        rule: allow
+        port: "{{ wg_port }}"
+        proto: udp
+      ignore_errors: true
+
+    - name: Enable and start WireGuard
+      systemd:
+        name: "wg-quick@{{ wg_interface }}"
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Show server public key
+      debug:
+        msg: "WireGuard server public key: {{ wg_server_public_key }}"
+
+  handlers:
+    - name: Restart WireGuard
+      systemd:
+        name: "wg-quick@{{ wg_interface }}"
+        state: restarted

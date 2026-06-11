@@ -1,0 +1,38 @@
+---
+# Playbook: Install one or more packages via apt
+# Usage: ansible-playbook 07_apt_install_package.yml -i inventory.ini
+#        -e "packages=['htop','curl','jq']"
+
+- name: Install packages via apt
+  hosts: all
+  become: true
+  vars:
+    packages:
+      - htop
+      - curl
+      - jq
+      - unzip
+    update_cache: true
+    cache_valid_time: 3600   # seconds; skip update if cache is fresh
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: "{{ update_cache }}"
+        cache_valid_time: "{{ cache_valid_time }}"
+
+    - name: Install requested packages
+      apt:
+        name: "{{ packages }}"
+        state: present
+
+    - name: Print installed versions
+      command: "dpkg -l {{ item }}"
+      loop: "{{ packages }}"
+      register: pkg_info
+      changed_when: false
+
+    - name: Show installed package info
+      debug:
+        msg: "{{ item.stdout_lines[-1] }}"
+      loop: "{{ pkg_info.results }}"

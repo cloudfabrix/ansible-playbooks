@@ -1,0 +1,123 @@
+---
+# Playbook: Deploy a static website via nginx with optional SSL
+# Usage: ansible-playbook 21_deploy_static_website.yml -i inventory.ini
+#        -e "domain=mysite.com site_src_dir=/local/path/to/site"
+
+- name: Deploy static website via nginx
+  hosts: all
+  become: true
+  vars:
+    domain: "mysite.com"
+    site_root: "/var/www/{{ domain }}"
+    site_src_dir: ""           # local path to sync; leave empty to skip rsync
+    nginx_user: www-data
+    enable_gzip: true
+    cache_static_days: 30
+    ssl_enabled: false
+    cert_path: "/etc/letsencrypt/live/{{ domain }}/fullchain.pem"
+    key_path: "/etc/letsencrypt/live/{{ domain }}/privkey.pem"
+
+  tasks:
+    - name: Install nginx
+      apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Create document root
+      file:
+        path: "{{ site_root }}"
+        state: directory
+        owner: "{{ nginx_user }}"
+        group: "{{ nginx_user }}"
+        mode: "0755"
+
+    - name: Sync site files to remote
+      synchronize:
+        src: "{{ site_src_dir }}/"
+        dest: "{{ site_root }}/"
+        delete: true
+        recursive: true
+      when: site_src_dir | length > 0
+      notify: Reload nginx
+
+    - name: Create default index if no source provided
+      copy:
+        dest: "{{ site_root }}/index.html"
+        content: "<h1>{{ domain }} — deployed by Ansible</h1>"
+        owner: "{{ nginx_user }}"
+        mode: "0644"
+        force: false
+      when: site_src_dir | length == 0
+
+    - name: Write nginx virtual host config
+      copy:
+        dest: "/etc/nginx/sites-available/{{ domain }}"
+        content: |
+          server {
+              listen 80;
+              server_name {{ domain }} www.{{ domain }};
+              root {{ site_root }};
+              index index.html;
+
+              {% if enable_gzip %}
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml;
+              {% endif %}
+
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2)$ {
+                  expires {{ cache_static_days }}d;
+                  add_header Cache-Control "public, immutable";
+              }
+
+              {% if ssl_enabled %}
+              listen 443 ssl;
+              ssl_certificate {{ cert_path }};
+              ssl_certificate_key {{ key_path }};
+              ssl_protocols TLSv1.2 TLSv1.3;
+              ssl_prefer_server_ciphers on;
+              {% endif %}
+          }
+      notify: Reload nginx
+
+    - name: Enable site
+      file:
+        src: "/etc/nginx/sites-available/{{ domain }}"
+        dest: "/etc/nginx/sites-enabled/{{ domain }}"
+        state: link
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Test nginx config
+      command: nginx -t
+      changed_when: false
+
+    - name: Start and enable nginx
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Open HTTP/HTTPS in UFW
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "80"
+        - "443"
+      ignore_errors: true
+
+  handlers:
+    - name: Reload nginx
+      service:
+        name: nginx
+        state: reloaded

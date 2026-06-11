@@ -1,0 +1,70 @@
+---
+# Playbook: Install and configure Redis
+# Usage: ansible-playbook 14_setup_redis.yml -i inventory.ini
+
+- name: Install and configure Redis
+  hosts: all
+  become: true
+  vars:
+    redis_port: 6379
+    redis_bind: "127.0.0.1"
+    redis_maxmemory: "256mb"
+    redis_maxmemory_policy: allkeys-lru
+    redis_password: ""          # Leave empty to disable auth
+    redis_loglevel: notice
+    redis_databases: 16
+
+  tasks:
+    - name: Install Redis
+      apt:
+        name: redis-server
+        state: present
+        update_cache: true
+
+    - name: Configure Redis
+      template:
+        dest: /etc/redis/redis.conf
+        content: |
+          bind {{ redis_bind }}
+          port {{ redis_port }}
+          daemonize no
+          supervised systemd
+          loglevel {{ redis_loglevel }}
+          databases {{ redis_databases }}
+          maxmemory {{ redis_maxmemory }}
+          maxmemory-policy {{ redis_maxmemory_policy }}
+          {% if redis_password | length > 0 %}
+          requirepass {{ redis_password }}
+          {% endif %}
+        backup: true
+      notify: Restart Redis
+
+    - name: Ensure Redis is started and enabled
+      service:
+        name: redis-server
+        state: started
+        enabled: true
+
+    - name: Open Redis port in UFW (if not localhost-only)
+      ufw:
+        rule: allow
+        port: "{{ redis_port }}"
+        proto: tcp
+      when: redis_bind != "127.0.0.1"
+      ignore_errors: true
+
+    - name: Verify Redis is responding
+      command: redis-cli ping
+      register: redis_ping
+      changed_when: false
+
+    - name: Check Redis response
+      assert:
+        that: redis_ping.stdout == "PONG"
+        fail_msg: "Redis did not respond with PONG"
+
+  handlers:
+    - name: Restart Redis
+      service:
+        name: redis-server
+        state: restarted

@@ -1,0 +1,83 @@
+---
+# Playbook: Run a Python HTTP server as a persistent systemd service
+# Usage: ansible-playbook 06_run_http_server.yml -i inventory.ini
+#        -e "http_port=8000 serve_dir=/var/www/html"
+
+- name: Run a Python HTTP server as a systemd service
+  hosts: all
+  become: true
+  vars:
+    http_port: 8000
+    serve_dir: /var/www/static
+    service_user: www-data
+
+  tasks:
+    - name: Ensure Python3 is installed
+      apt:
+        name: python3
+        state: present
+        update_cache: true
+
+    - name: Create document root
+      file:
+        path: "{{ serve_dir }}"
+        state: directory
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0755"
+
+    - name: Create a sample index.html
+      copy:
+        dest: "{{ serve_dir }}/index.html"
+        content: |
+          <!DOCTYPE html>
+          <html><body><h1>Ansible-deployed HTTP Server</h1></body></html>
+        owner: "{{ service_user }}"
+        group: "{{ service_user }}"
+        mode: "0644"
+        force: false   # Don't overwrite if already exists
+
+    - name: Create systemd unit for Python HTTP server
+      copy:
+        dest: /etc/systemd/system/python-http-server.service
+        content: |
+          [Unit]
+          Description=Python HTTP Server on port {{ http_port }}
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ service_user }}
+          WorkingDirectory={{ serve_dir }}
+          ExecStart=/usr/bin/python3 -m http.server {{ http_port }}
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd
+        - Restart http server
+
+    - name: Open HTTP server port in UFW
+      ufw:
+        rule: allow
+        port: "{{ http_port }}"
+        proto: tcp
+      ignore_errors: true
+
+    - name: Enable and start python-http-server
+      service:
+        name: python-http-server
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: Restart http server
+      service:
+        name: python-http-server
+        state: restarted

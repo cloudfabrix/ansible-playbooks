@@ -1,0 +1,49 @@
+---
+# Playbook: Install OpenJDK and optionally set JAVA_HOME
+# Usage: ansible-playbook 22_install_java.yml -i inventory.ini
+#        -e "java_version=21"
+
+- name: Install OpenJDK
+  hosts: all
+  become: true
+  vars:
+    java_version: "21"         # 11, 17, 21
+    java_type: jdk             # jdk or jre
+    set_java_home: true
+    java_home_profile: /etc/profile.d/java.sh
+
+  tasks:
+    - name: Install OpenJDK {{ java_version }}
+      apt:
+        name: "openjdk-{{ java_version }}-{{ java_type }}"
+        state: present
+        update_cache: true
+
+    - name: Find JAVA_HOME path
+      command: "dirname $(dirname $(readlink -f $(which java)))"
+      register: java_home_raw
+      changed_when: false
+
+    - name: Set JAVA_HOME system-wide
+      copy:
+        dest: "{{ java_home_profile }}"
+        content: |
+          export JAVA_HOME={{ java_home_raw.stdout }}
+          export PATH=$JAVA_HOME/bin:$PATH
+        mode: "0644"
+      when: set_java_home
+
+    - name: Set default java via update-alternatives
+      alternatives:
+        name: java
+        path: "{{ java_home_raw.stdout }}/bin/java"
+        priority: 100
+
+    - name: Verify Java version
+      command: java -version
+      register: java_ver
+      changed_when: false
+
+    - name: Show Java version
+      debug:
+        msg: "{{ java_ver.stderr }}"

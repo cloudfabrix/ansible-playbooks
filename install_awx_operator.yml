@@ -1,0 +1,139 @@
+---
+# Playbook: Install the AWX Operator on an existing Kubernetes cluster
+#
+# Runs on your Ansible control node (localhost) or any host with kubectl
+# access to the cluster. Does NOT touch the cluster nodes directly.
+#
+# Prerequisites:
+#   - kubectl configured and pointing at the target cluster
+#     (KUBECONFIG env var or ~/.kube/config)
+#   - cluster-admin permissions
+#
+# Usage:
+#   ansible-playbook 31_install_awx_operator.yml
+#   ansible-playbook 31_install_awx_operator.yml -e "awx_operator_version=2.19.1"
+
+- name: Install AWX Operator on Kubernetes
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    awx_operator_version: "2.19.1"        # https://github.com/ansible/awx-operator/releases
+    awx_namespace: "awx"
+    kustomize_version: "5.4.1"
+    kustomize_install_dir: "/usr/local/bin"
+    kubectl_context: ""                   # Leave empty to use current context
+
+  tasks:
+    # ── Tool installation ─────────────────────────────────────────────────
+
+    - name: Check if kubectl is available
+      command: kubectl version --client --output=json
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if kubectl is not installed
+      fail:
+        msg: >
+          kubectl not found. Install it from https://kubernetes.io/docs/tasks/tools/
+          and ensure KUBECONFIG is set correctly.
+      when: kubectl_check.rc != 0
+
+    - name: Check if kustomize is available
+      command: kustomize version
+      register: kustomize_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download and install kustomize
+      shell: |
+        curl -sLo /tmp/kustomize.tar.gz \
+          "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
+        tar -xzf /tmp/kustomize.tar.gz -C {{ kustomize_install_dir }}
+        chmod +x {{ kustomize_install_dir }}/kustomize
+        rm /tmp/kustomize.tar.gz
+      when: kustomize_check.rc != 0
+      become: true
+
+    # ── Cluster connectivity check ────────────────────────────────────────
+
+    - name: Verify cluster connectivity
+      command: "{{ 'kubectl --context=' + kubectl_context if kubectl_context else 'kubectl' }} cluster-info"
+      register: cluster_info
+      changed_when: false
+
+    - name: Show cluster info
+      debug:
+        var: cluster_info.stdout_lines
+
+    # ── Namespace ─────────────────────────────────────────────────────────
+
+    - name: Create AWX namespace
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        create namespace {{ awx_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: true
+
+    # ── AWX Operator via kustomize ────────────────────────────────────────
+
+    - name: Create kustomize working directory
+      file:
+        path: /tmp/awx-operator-install
+        state: directory
+        mode: "0755"
+
+    - name: Write kustomization.yaml for AWX Operator
+      copy:
+        dest: /tmp/awx-operator-install/kustomization.yaml
+        content: |
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - https://raw.githubusercontent.com/ansible/awx-operator/{{ awx_operator_version }}/config/default/kustomization.yaml
+          namespace: {{ awx_namespace }}
+
+    - name: Apply AWX Operator via kustomize
+      shell: |
+        kustomize build /tmp/awx-operator-install | \
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }} apply -f -
+      register: operator_apply
+      changed_when: "'created' in operator_apply.stdout or 'configured' in operator_apply.stdout"
+
+    - name: Show apply output
+      debug:
+        var: operator_apply.stdout_lines
+
+    # ── Wait for operator to be ready ─────────────────────────────────────
+
+    - name: Wait for AWX Operator deployment to be available (up to 5 min)
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }}
+        rollout status deployment/awx-operator-controller-manager
+        --timeout=300s
+      register: operator_status
+      changed_when: false
+
+    - name: List operator pods
+      command: >
+        kubectl {{ '--context=' + kubectl_context if kubectl_context else '' }}
+        -n {{ awx_namespace }} get pods -l "app.kubernetes.io/name=awx-operator"
+      register: operator_pods
+      changed_when: false
+
+    - name: Show operator pods
+      debug:
+        var: operator_pods.stdout_lines
+
+    - name: Clean up temp files
+      file:
+        path: /tmp/awx-operator-install
+        state: absent
+
+    - name: Success message
+      debug:
+        msg: >
+          AWX Operator v{{ awx_operator_version }} is running in namespace '{{ awx_namespace }}'.
+          Next step: run 32_deploy_awx_instance.yml to create the AWX instance.

@@ -1,0 +1,105 @@
+---
+# Playbook: OS hardening baseline — SSH, sysctl, kernel params, audit
+# Usage: ansible-playbook 19_os_hardening_baseline.yml -i inventory.ini
+
+- name: Apply OS hardening baseline
+  hosts: all
+  become: true
+  vars:
+    disable_root_login: true
+    disable_password_auth: true
+    ssh_port: 22
+    allowed_ssh_users: []          # empty = all users may connect
+    enable_auditd: true
+    disable_unused_services:
+      - avahi-daemon
+      - cups
+      - rpcbind
+    sysctl_params:
+      net.ipv4.ip_forward: 0
+      net.ipv4.conf.all.send_redirects: 0
+      net.ipv4.conf.default.send_redirects: 0
+      net.ipv4.conf.all.accept_redirects: 0
+      net.ipv4.conf.all.log_martians: 1
+      net.ipv4.tcp_syncookies: 1
+      kernel.dmesg_restrict: 1
+      fs.suid_dumpable: 0
+
+  tasks:
+    - name: Harden SSH configuration
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: true
+      loop:
+        - { regexp: "^#?PermitRootLogin", line: "PermitRootLogin {{ 'no' if disable_root_login else 'yes' }}" }
+        - { regexp: "^#?PasswordAuthentication", line: "PasswordAuthentication {{ 'no' if disable_password_auth else 'yes' }}" }
+        - { regexp: "^#?Port ", line: "Port {{ ssh_port }}" }
+        - { regexp: "^#?X11Forwarding", line: "X11Forwarding no" }
+        - { regexp: "^#?MaxAuthTries", line: "MaxAuthTries 4" }
+        - { regexp: "^#?LoginGraceTime", line: "LoginGraceTime 60" }
+        - { regexp: "^#?PermitEmptyPasswords", line: "PermitEmptyPasswords no" }
+        - { regexp: "^#?ClientAliveInterval", line: "ClientAliveInterval 300" }
+        - { regexp: "^#?ClientAliveCountMax", line: "ClientAliveCountMax 2" }
+      notify: Restart sshd
+
+    - name: Restrict SSH to allowed users
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?AllowUsers"
+        line: "AllowUsers {{ allowed_ssh_users | join(' ') }}"
+      when: allowed_ssh_users | length > 0
+      notify: Restart sshd
+
+    - name: Apply sysctl hardening parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop: "{{ sysctl_params | dict2items }}"
+
+    - name: Disable unused services
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: "{{ disable_unused_services }}"
+      ignore_errors: true
+
+    - name: Install auditd
+      apt:
+        name: auditd
+        state: present
+      when: enable_auditd
+
+    - name: Enable auditd
+      service:
+        name: auditd
+        state: started
+        enabled: true
+      when: enable_auditd
+
+    - name: Set umask to 027 in /etc/profile
+      lineinfile:
+        path: /etc/profile
+        regexp: "^umask"
+        line: "umask 027"
+
+    - name: Ensure /tmp is mounted with noexec (if separate partition)
+      mount:
+        path: /tmp
+        opts: "defaults,noexec,nosuid,nodev"
+        state: present
+      ignore_errors: true
+
+    - name: Validate sshd config before restarting
+      command: sshd -t
+      changed_when: false
+
+  handlers:
+    - name: Restart sshd
+      service:
+        name: sshd
+        state: restarted
