@@ -1,0 +1,7 @@
+---
+- name: Dynamic Playbook Launcher
+  hosts: all
+  tasks:
+    - name: Include the user-specified playbook
+      ansible.builtin.include_tasks: "{{ target_playbook }}"
+
