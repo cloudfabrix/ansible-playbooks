@@ -33,18 +33,14 @@
         update_cache: true
 
     - name: Install yarn globally
-      npm:
-        name: yarn
-        global: true
-        state: present
+      command: npm install -g yarn
       when: install_yarn
+      changed_when: true
 
     - name: Install PM2 process manager globally
-      npm:
-        name: pm2
-        global: true
-        state: present
+      command: npm install -g pm2
       when: install_pm2
+      changed_when: true
 
     - name: Verify Node.js version
       command: node --version
